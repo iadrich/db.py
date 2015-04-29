@@ -14,12 +14,13 @@ import sys
 
 import pandas as pd
 from prettytable import PrettyTable
-import pybars 
+import pybars
 
 from .queries import mysql as mysql_templates
 from .queries import postgres as postgres_templates
 from .queries import sqlite as sqlite_templates
 from .queries import mssql as mssql_templates
+from .queries import exasol as exasol_templates
 
 
 queries_templates = {
@@ -28,6 +29,7 @@ queries_templates = {
     "redshift": postgres_templates,
     "sqlite": sqlite_templates,
     "mssql": mssql_templates,
+    "exasol": exasol_templates
 }
 
 # attempt to import the relevant database libraries
@@ -296,6 +298,7 @@ class Table(object):
             setattr(self, column_name, col)
 
         self.ref_keys = ColumnSet(self.ref_keys)
+        self._cur.close()
 
     def _tablify(self):
         tbl = PrettyTable(["Column", "Type", "Foreign Keys", "Reference Keys"])
@@ -720,6 +723,8 @@ class DB(object):
         that you'll have verrrrrrrry wide columns in some cases.
     driver: str, None
         Driver for mssql/pyodbc connections.
+    dsn: str, None
+        DSN for ODBC connections (Exasol)
 
     Examples
     --------
@@ -737,7 +742,7 @@ class DB(object):
     def __init__(self, username=None, password=None, hostname="localhost",
             port=None, filename=None, dbname=None, dbtype=None, schemas=None,
             profile="default", exclude_system_tables=True, limit=1000,
-            keys_per_column=None, driver=None):
+            keys_per_column=None, driver=None, dsn=None):
 
         if port is None:
             if dbtype=="postgres":
@@ -755,7 +760,7 @@ class DB(object):
             else:
                 raise Exception("Database type not specified! Must select one of: postgres, sqlite, mysql, mssql, or redshift")
 
-        if not dbtype in ("sqlite", "mssql") and username is None:
+        if not dbtype in ("sqlite", "mssql", "exasol") and username is None:
             self.load_credentials(profile)
         elif dbtype=="sqlite" and filename is None:
             self.load_credentials(profile)
@@ -771,6 +776,7 @@ class DB(object):
             self.limit = limit
             self.keys_per_column = keys_per_column
             self.driver = driver
+            self.dsn = dsn
 
         if self.dbtype is None:
             raise Exception("Database type not specified! Must select one of: postgres, sqlite, mysql, mssql, or redshift")
@@ -848,6 +854,29 @@ class DB(object):
                                            password=self.password,
                                            database=self.dbname)
                 self.cur = self.con.cursor()
+        elif self.dbtype=="exasol":
+            if not HAS_ODBC:
+                raise Exception("Couldn't find pyodbc library. Please ensure it's installed")
+
+            if HAS_ODBC:
+                base_con = "DSN={dsn}".format(
+                    dsn=self.dsn
+                )
+                conn_str=base_con
+
+                try:
+                    self.con = pyo.connect(conn_str)
+                    self.cur = self.con.cursor()
+                except:
+                    self.con = pyo.connect(
+                            driver=self.driver or "SQL Server",
+                            server=self.hostname or "localhost",
+                            port=self.port,
+                            database=self.dbname or '',
+                            uid=self.username,
+                            pwd=self.password)
+                    self.cur = self.con.cursor()
+
 
         self.tables = TableSet([])
         self.refresh_schema(exclude_system_tables)
@@ -1054,13 +1083,13 @@ class DB(object):
             if limit:
                 q = "select top {limit} * from ({q}) q".format(limit=limit, q=q)
             return q
-    
+
     def _apply_handlebars(self, q, data, union=True):
         if (sys.version_info < (3, 0)):
             q = unicode(q)
         template = self.handlebars.compile(q)
         if isinstance(data, list):
-            query = [template(item) for item in data] 
+            query = [template(item) for item in data]
             query = [str(item) for item in query]
             if union==True:
                 query = "\nUNION ALL".join(query)
@@ -1412,7 +1441,7 @@ class DB(object):
             from boto.s3.connection import Location
 
             # if boto is present, set the bucket_location to default.
-            # we can't do this in the function definition because we're 
+            # we can't do this in the function definition because we're
             # lazily importing boto only if necessary here.
             if bucket_location is None:
                 bucket_location = Location.DEFAULT
